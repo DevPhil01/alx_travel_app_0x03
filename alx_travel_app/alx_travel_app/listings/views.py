@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 ViewSets for Listings, Bookings, and Payment API with Chapa integration.
+Includes Celery task for booking confirmation emails.
 """
 
 import os
@@ -11,6 +12,9 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from .models import Listing, Booking, Payment
 from .serializers import ListingSerializer, BookingSerializer
+
+# ✅ Import Celery task
+from .tasks import send_booking_confirmation_email
 
 CHAPA_SECRET_KEY = os.getenv("CHAPA_SECRET_KEY")
 CHAPA_BASE_URL = "https://api.chapa.co/v1/transaction"
@@ -24,13 +28,25 @@ class ListingViewSet(viewsets.ModelViewSet):
 
 
 class BookingViewSet(viewsets.ModelViewSet):
-    """ViewSet for Bookings with full CRUD support."""
+    """ViewSet for Bookings with full CRUD support and async email notifications."""
     queryset = Booking.objects.all()
     serializer_class = BookingSerializer
     permission_classes = [permissions.IsAuthenticated]
 
+    def perform_create(self, serializer):
+        """Trigger Celery email task when a booking is created."""
+        booking = serializer.save(user=self.request.user)
 
-# ✅ NEW CLASS: Payment Initiation and Verification
+        # ✅ Trigger asynchronous email notification
+        send_booking_confirmation_email.delay(
+            user_email=self.request.user.email,
+            listing_name=booking.listing.title,
+            booking_id=str(booking.booking_id)
+        )
+
+        return booking
+
+
 class InitiatePaymentView(APIView):
     """Initiate payment for a booking using Chapa API."""
 
@@ -51,7 +67,7 @@ class InitiatePaymentView(APIView):
             # Create initial payment record
             payment = Payment.objects.create(
                 booking=booking,
-                amount=booking.listing.price_per_night,  # You can customize this to total nights * price_per_night
+                amount=booking.listing.price_per_night,
                 transaction_reference=tx_ref,
                 status="pending"
             )
