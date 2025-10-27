@@ -1,210 +1,170 @@
 # alx_travel_app
 
-A Django REST Framework (DRF) project for managing travel listings, bookings, reviews, **and payments via Chapa API**.  
-This project provides APIs to create, retrieve, and manage travel-related data, initiate and verify payments securely, and includes built-in API documentation.  
+A Django REST Framework (DRF) project for managing travel listings, bookings, reviews, **and payments via Chapa API**, now extended with **Celery and RabbitMQ** to handle background email notifications asynchronously.
 
 ---
 
 ## Features
 
-- **Listings**: Create, view, update, and delete travel listings with details such as title, description, location, price, and availability.  
-- **Bookings**: Book a listing by providing user details and booking dates. View existing bookings.  
-- **Reviews**: Users can leave reviews for listings, including a rating and comment.  
-- **Payments (New)**: Integrated **Chapa API** to initiate and verify payments securely.  
-- **Serializers**: Data representation through Django REST Framework serializers.  
-- **Database Seeder**: A management command to populate the database with sample listings for testing and development.  
-- **API Documentation**: Interactive Swagger UI and ReDoc interfaces for testing and exploring endpoints.  
+- **Listings**: Create, view, update, and delete travel listings.  
+- **Bookings**: Book listings and trigger background confirmation emails.  
+- **Payments (New)**: Integrated **Chapa API** for secure payment processing.  
+- **Email Notifications (New)**: Booking confirmation emails sent asynchronously via **Celery with RabbitMQ**.  
+- **API Documentation**: Built-in Swagger and ReDoc endpoints.  
 
 ---
 
-## Project Structure
+## Celery & RabbitMQ Integration
 
-```
-alx_travel_app/
-│
-├── alx_travel_app/           
-│   ├── settings.py
-│   ├── urls.py
-│   └── wsgi.py
-│
-├── listings/                 
-│   ├── models.py             # Defines Listing, Booking, Review, and Payment models
-│   ├── serializers.py        
-│   ├── views.py              # ViewSets and Chapa payment integration logic
-│   ├── urls.py               
-│   └── management/
-│       └── commands/
-│           └── seed.py       
-│
-├── db.sqlite3
-└── manage.py
-```
-
----
-
-## Models
-
-### Listing
-- `title` (CharField)  
-- `description` (TextField)  
-- `location` (CharField)  
-- `price_per_night` (DecimalField)  
-- `created_at` (DateTimeField)  
-
-### Booking
-- `listing` (ForeignKey → Listing)  
-- `user` (ForeignKey → User)  
-- `check_in` (DateField)  
-- `check_out` (DateField)  
-- `status` (choices: pending, confirmed, canceled)  
-- `created_at` (DateTimeField)  
-
-### Review
-- `listing` (ForeignKey → Listing)  
-- `user` (ForeignKey → User)  
-- `rating` (IntegerField, 1–5)  
-- `comment` (TextField, optional)  
-- `created_at` (DateTimeField)  
-
-### Payment (New)
-- `booking` (ForeignKey → Booking)`  
-- `amount` (DecimalField)`  
-- `transaction_id` (CharField)`  
-- `status` (choices: Pending, Completed, Failed)`  
-- `reference` (CharField)`  
-- `created_at` (DateTimeField)`  
-
----
-
-## Chapa API Integration
-
-### Overview
-This integration allows users to securely make payments for bookings via the **Chapa Payment Gateway**.
-
-### Environment Variables
-In your `.env` file (or system environment), define:
+### 1️⃣ Install Dependencies
 
 ```bash
-CHAPA_PUBLIC_KEY=CHAPUBK_TEST-IU051xgahZT8VzoQoBCAAD8xWnVTNqWZ
-CHAPA_SECRET_KEY=CHASECK_TEST-uAUrKkyTb8ZLOTRUaIEEiiNh0T30oQkV
-CHAPA_ENCRYPTION_KEY=jOoK36AnBOjIN8zbGZfPKDOb
-```
-
-Ensure these keys are **not** committed to your GitHub repo for security.
-
----
-
-### Payment Flow
-
-1. **Initiate Payment**
-   - When a user books a listing, a POST request is sent to `/api/initiate-payment/` with the booking details and amount.
-   - The view contacts **Chapa’s Initiate Payment Endpoint** using your `CHAPA_SECRET_KEY`.
-   - A transaction reference and payment URL are returned.
-   - The Payment record is stored with status `Pending`.
-
-2. **Verify Payment**
-   - After payment completion, a GET request to `/api/verify-payment/{reference}/` checks the status from Chapa’s verification endpoint.
-   - If successful, the payment status updates to `Completed`; otherwise, `Failed`.
-
----
-
-### Example API Workflow
-
-#### 1️⃣ Initiate a Payment
-**POST** `/api/initiate-payment/`
-
-**Body:**
-```json
-{
-  "booking_id": "a2f4d980-45a2-4cc8-8df9-fcbfa1924a91",
-  "amount": 2500
-}
-```
-
-**Response:**
-```json
-{
-  "payment_url": "https://checkout.chapa.co/pay/xYe82n1",
-  "transaction_id": "tx-1234567890",
-  "status": "Pending"
-}
+pip install celery==5.3.6 django-celery-results
+sudo apt install rabbitmq-server  # For Linux
 ```
 
 ---
 
-#### 2️⃣ Verify Payment
-**GET** `/api/verify-payment/{reference}/`
+### 2️⃣ Configuration
 
-**Response:**
-```json
-{
-  "reference": "xYe82n1",
-  "status": "Completed",
-  "message": "Payment verified successfully"
-}
+**In `alx_travel_app/settings.py`:**
+
+```python
+CELERY_BROKER_URL = env('CELERY_BROKER_URL', default='amqp://guest:guest@localhost//')
+CELERY_RESULT_BACKEND = env('CELERY_RESULT_BACKEND', default='rpc://')
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = 'UTC'
 ```
 
 ---
 
-### Testing with Chapa Sandbox
+### 3️⃣ Celery Setup
 
-You can test payments in the **sandbox** mode using your test API keys (as provided above).
+**File: `alx_travel_app/celery.py`**
 
-- Base URL: `https://api.chapa.co/v1/transaction`
-- Example sandbox test card:  
-  - Card: `4242 4242 4242 4242`  
-  - Expiry: `12/30`  
-  - CVV: `123`  
+```python
+from __future__ import absolute_import, unicode_literals
+import os
+from celery import Celery
 
-After a successful transaction, run the verification endpoint to confirm that payment records update properly in your database.
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'alx_travel_app.settings')
+
+app = Celery('alx_travel_app')
+app.config_from_object('django.conf:settings', namespace='CELERY')
+app.autodiscover_tasks()
+
+@app.task(bind=True)
+def debug_task(self):
+    print(f'Request: {self.request!r}')
+```
+
+**File: `alx_travel_app/__init__.py`**
+
+```python
+from __future__ import absolute_import, unicode_literals
+from .celery import app as celery_app
+
+__all__ = ('celery_app',)
+```
 
 ---
 
-## Installation & Setup
+### 4️⃣ Task Definition
 
-Follow the same steps as before, but now add environment configuration:
+**File: `listings/tasks.py`**
+
+```python
+from celery import shared_task
+from django.core.mail import send_mail
+from datetime import datetime
+
+@shared_task
+def send_booking_confirmation_email(user_email, listing_title, check_in, check_out):
+    subject = "Booking Confirmation"
+    message = (
+        f"Your booking for '{listing_title}' has been confirmed!\n\n"
+        f"Check-in Date: {check_in}\n"
+        f"Check-out Date: {check_out}\n"
+        f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        "Thank you for booking with us!"
+    )
+    from_email = "no-reply@alxtravel.com"
+    send_mail(subject, message, from_email, [user_email])
+    return f"Confirmation email sent to {user_email}"
+```
+
+---
+
+### 5️⃣ Trigger Task in Views
+
+In **`listings/views.py`**, after booking creation:
+
+```python
+from .tasks import send_booking_confirmation_email
+
+send_booking_confirmation_email.delay(
+    request.user.email,
+    booking.listing.title,
+    booking.check_in,
+    booking.check_out
+)
+```
+
+---
+
+### 6️⃣ Run Services
+
+Start the services in three separate terminals:
 
 ```bash
-pip install python-dotenv
-```
-
-Then create `.env` in your project root with your Chapa keys.
-
-Run:
-```bash
-python manage.py makemigrations
-python manage.py migrate
+sudo service rabbitmq-server start
+celery -A alx_travel_app worker --loglevel=info
 python manage.py runserver
 ```
 
 ---
 
-## API Endpoints
+## Email Configuration
 
-| Endpoint                        | Method | Description                                   |
-|---------------------------------|--------|-----------------------------------------------|
-| `/api/listings/`               | GET    | List all listings                             |
-| `/api/listings/`               | POST   | Create a new listing                          |
-| `/api/bookings/`               | POST   | Create a new booking                          |
-| `/api/initiate-payment/`       | POST   | Initiate a new Chapa payment                  |
-| `/api/verify-payment/<ref>/`   | GET    | Verify a Chapa payment status                 |
+For local testing:
+
+```python
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+```
+
+For production (Gmail SMTP):
+
+```python
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = 'smtp.gmail.com'
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+EMAIL_HOST_USER = 'your_email@gmail.com'
+EMAIL_HOST_PASSWORD = 'your_app_password'
+```
+
+---
+
+## Testing the Flow
+
+1. Create a booking via `/api/bookings/`  
+2. Watch Celery terminal — it should log email task success  
+3. Check email (or console output for local backend)  
 
 ---
 
 ## API Documentation
 
-Interactive API documentation remains available:
-
-- **Swagger UI**: [http://127.0.0.1:8000/swagger/](http://127.0.0.1:8000/swagger/)  
-- **ReDoc**: [http://127.0.0.1:8000/redoc/](http://127.0.0.1:8000/redoc/)  
+- Swagger UI → `http://127.0.0.1:8000/swagger/`  
+- ReDoc → `http://127.0.0.1:8000/redoc/`
 
 ---
 
 ## Tech Stack
 
-- **Python 3.x**  
-- **Django 5.x**  
-- **Django REST Framework**  
-- **drf-yasg (Swagger/ReDoc)**  
-- **Chapa API (Payment Gateway)**  
-- **SQLite (default, can be replaced with PostgreSQL/MySQL)**  
+- **Python 3.x**, **Django 5.x**  
+- **Django REST Framework**, **Celery**, **RabbitMQ**  
+- **drf-yasg** for API documentation  
+- **PostgreSQL / SQLite** database  
